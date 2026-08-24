@@ -225,24 +225,25 @@ func (s *Session) EncryptMessage(plaintext []byte) (*Packet, error) {
 		return nil, fmt.Errorf("session: cannot encrypt message on unestablished session")
 	}
 
+	s.OutSequence++
+
 	pkt := &Packet{
 		Version:            CurrentProtocolVersion,
 		Type:               MessageTypeData,
 		Epoch:              s.Epoch,
+		Sequence:           s.OutSequence,
 		SenderFingerprint:  s.LocalId.Fingerprint(),
 		RecipientFingerprint: s.PeerId.Fingerprint(),
 	}
 
-	ePubBytes, ciphertext, seq, err := s.Ratchet.RatchetEncrypt(plaintext, nil, func(ePub []byte) []byte {
+	ePubBytes, ciphertext, _, err := s.Ratchet.RatchetEncrypt(plaintext, nil, func(ePub []byte) []byte {
 		copy(pkt.EphemeralPublicKey[:], ePub)
-		pkt.Sequence = uint64(s.Ratchet.Ns)
 		return pkt.ComputeAAD()
 	})
 	if err != nil {
 		return nil, fmt.Errorf("session: ratchet encryption failed: %w", err)
 	}
 
-	pkt.Sequence = uint64(seq)
 	copy(pkt.EphemeralPublicKey[:], ePubBytes)
 	copy(pkt.Nonce[:], ciphertext[:24])
 	pkt.Payload = ciphertext[24:]
@@ -279,7 +280,7 @@ func (s *Session) DecryptMessage(pkt *Packet) ([]byte, error) {
 	fullCiphertext := append(pkt.Nonce[:], pkt.Payload...)
 	aad := pkt.ComputeAAD()
 
-	plaintext, err := s.Ratchet.RatchetDecrypt(pkt.EphemeralPublicKey[:], fullCiphertext, aad, uint32(pkt.Sequence))
+	plaintext, err := s.Ratchet.RatchetDecrypt(pkt.EphemeralPublicKey[:], fullCiphertext, aad, 0)
 	if err != nil {
 		return nil, fmt.Errorf("session: ratchet decryption failed: %w", err)
 	}
