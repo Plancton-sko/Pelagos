@@ -15,6 +15,9 @@ func main() {
 	addr := flag.String("addr", "0.0.0.0:8080", "Server listening address")
 	transportType := flag.String("transport", "tcp", "Transport type: 'tcp' or 'onion'")
 	socksAddr := flag.String("socks", "127.0.0.1:9050", "Tor SOCKS5 proxy address")
+	torControlAddr := flag.String("tor-control", "127.0.0.1:9051", "Tor Control Port address for automated .onion creation")
+	torPass := flag.String("tor-pass", "", "Tor Control Port authentication password")
+	torCookie := flag.String("tor-cookie", "", "Tor Control Port cookie file path")
 	flag.Parse()
 
 	srv, err := server.NewServer()
@@ -33,28 +36,43 @@ func main() {
 	fmt.Printf("Server Identity FP:       %s\n", fp)
 	fmt.Printf("Listening Address:        %s\n", *addr)
 	fmt.Printf("Transport Engine:         %s\n", *transportType)
-	fmt.Println("=================================================================")
-	fmt.Println("\n[ZERO-TRUST GUARANTEE] Server operates strictly as a store-and-forward relay.")
-	fmt.Println("Zero visibility into message plaintexts; zero capability to forge/tamper packet headers.")
 
 	var tr transport.Transport
+	var onionListener *transport.OnionListener
+
+	ctx := context.Background()
+
 	if *transportType == "onion" {
 		ot, err := transport.NewOnionTransport(*socksAddr)
 		if err != nil {
 			fmt.Printf("Error initializing Tor transport: %v\n", err)
 			os.Exit(1)
 		}
+
+		// Attempt automated ephemeral .onion service creation via Tor Control Port
+		onionListener, err = ot.ProvisionEphemeralOnion(ctx, *torControlAddr, *torPass, *torCookie, 9090, *addr)
+		if err != nil {
+			fmt.Printf("[!] Warning: Tor Control Port provisioning failed (%v). Falling back to direct socket listener on %s\n", err, *addr)
+			if err := ot.Listen(ctx, *addr); err != nil {
+				fmt.Printf("Failed to bind server listener: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Printf("Automated v3 .onion Address: %s\n", onionListener.OnionAddress())
+		}
 		tr = ot
 	} else {
 		tr = transport.NewTCPTransport()
-	}
-
-	ctx := context.Background()
-	if err := tr.Listen(ctx, *addr); err != nil {
-		fmt.Printf("Failed to bind server listener: %v\n", err)
-		os.Exit(1)
+		if err := tr.Listen(ctx, *addr); err != nil {
+			fmt.Printf("Failed to bind server listener: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	defer tr.Close()
+
+	fmt.Println("=================================================================")
+	fmt.Println("\n[ZERO-TRUST GUARANTEE] Server operates strictly as a store-and-forward relay.")
+	fmt.Println("Zero visibility into message plaintexts; zero capability to forge/tamper packet headers.")
 
 	for {
 		conn, err := tr.Accept(ctx)
