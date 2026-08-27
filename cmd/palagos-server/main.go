@@ -13,7 +13,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", "0.0.0.0:8080", "Server listening address")
-	transportType := flag.String("transport", "tcp", "Transport type: 'tcp' or 'onion'")
+	transportType := flag.String("transport", "onion", "Transport type: 'onion' or 'bluetooth'")
 	socksAddr := flag.String("socks", "127.0.0.1:9050", "Tor SOCKS5 proxy address")
 	torControlAddr := flag.String("tor-control", "127.0.0.1:9051", "Tor Control Port address for automated .onion creation")
 	torPass := flag.String("tor-pass", "", "Tor Control Port authentication password")
@@ -42,7 +42,8 @@ func main() {
 
 	ctx := context.Background()
 
-	if *transportType == "onion" {
+	switch *transportType {
+	case "onion":
 		ot, err := transport.NewOnionTransport(*socksAddr)
 		if err != nil {
 			fmt.Printf("Error initializing Tor transport: %v\n", err)
@@ -61,12 +62,15 @@ func main() {
 			fmt.Printf("Automated v3 .onion Address: %s\n", onionListener.OnionAddress())
 		}
 		tr = ot
-	} else {
-		tr = transport.NewTCPTransport()
+	case "bluetooth":
+		tr = transport.NewBluetoothTransport(*addr)
 		if err := tr.Listen(ctx, *addr); err != nil {
-			fmt.Printf("Failed to bind server listener: %v\n", err)
+			fmt.Printf("Failed to bind Bluetooth listener: %v\n", err)
 			os.Exit(1)
 		}
+	default:
+		fmt.Printf("Error: unsupported transport type '%s'. Supported types: 'onion', 'bluetooth'\n", *transportType)
+		os.Exit(1)
 	}
 	defer tr.Close()
 

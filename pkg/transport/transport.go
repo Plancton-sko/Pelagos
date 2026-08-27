@@ -12,8 +12,8 @@ import (
 //
 // Transport Independence Principle:
 // Palagos cryptographic protocol operates entirely independently of the transport layer.
-// Messages encrypted by the session layer can travel over TCP, Tor .onion sockets, Bluetooth RFCOMM,
-// Wi-Fi Direct, or Store-and-Forward Mesh without altering key evolution, AEAD authentication, or replay protection.
+// Messages encrypted by the session layer can travel over Tor .onion sockets or Bluetooth RFCOMM
+// without altering key evolution, AEAD authentication, or replay protection.
 type Transport interface {
 	// Listen starts accepting incoming encrypted Palagos connections.
 	Listen(ctx context.Context, address string) error

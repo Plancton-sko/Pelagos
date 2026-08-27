@@ -65,8 +65,8 @@ func handleGenIdentity() {
 
 func handleListen(args []string) {
 	fs := flag.NewFlagSet("listen", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:9090", "Local TCP listening address")
-	transportType := fs.String("transport", "tcp", "Transport type: 'tcp' or 'onion'")
+	addr := fs.String("addr", "127.0.0.1:9090", "Local listening address / MAC address")
+	transportType := fs.String("transport", "onion", "Transport type: 'onion' or 'bluetooth'")
 	socksAddr := fs.String("socks", "127.0.0.1:9050", "Tor SOCKS5 proxy address (for 'onion' transport)")
 	privKeyHex := fs.String("key", "", "Hex-encoded 64-byte Ed25519 private key")
 
@@ -91,15 +91,19 @@ func handleListen(args []string) {
 	}
 
 	var tr transport.Transport
-	if *transportType == "onion" {
+	switch *transportType {
+	case "onion":
 		ot, err := transport.NewOnionTransport(*socksAddr)
 		if err != nil {
 			fmt.Printf("Error creating Onion transport: %v\n", err)
 			os.Exit(1)
 		}
 		tr = ot
-	} else {
-		tr = transport.NewTCPTransport()
+	case "bluetooth":
+		tr = transport.NewBluetoothTransport(*addr)
+	default:
+		fmt.Printf("Error: unsupported transport type '%s'. Supported types: 'onion', 'bluetooth'\n", *transportType)
+		os.Exit(1)
 	}
 
 	ctx := context.Background()
@@ -145,8 +149,8 @@ func handleIncomingConn(localId *identity.Identity, conn transport.Conn) {
 
 func handleSend(args []string) {
 	fs := flag.NewFlagSet("send", flag.ExitOnError)
-	targetAddr := fs.String("to", "127.0.0.1:9090", "Target peer endpoint or .onion address")
-	transportType := fs.String("transport", "tcp", "Transport type: 'tcp' or 'onion'")
+	targetAddr := fs.String("to", "127.0.0.1:9090", "Target peer endpoint, .onion address, or Bluetooth MAC")
+	transportType := fs.String("transport", "onion", "Transport type: 'onion' or 'bluetooth'")
 	socksAddr := fs.String("socks", "127.0.0.1:9050", "Tor SOCKS5 proxy address")
 	privKeyHex := fs.String("key", "", "Local Ed25519 private key in hex")
 	peerPubHex := fs.String("peer-pub", "", "Remote peer Ed25519 public key in hex")
@@ -185,15 +189,19 @@ func handleSend(args []string) {
 	}
 
 	var tr transport.Transport
-	if *transportType == "onion" {
+	switch *transportType {
+	case "onion":
 		ot, err := transport.NewOnionTransport(*socksAddr)
 		if err != nil {
 			fmt.Printf("Error creating Tor transport: %v\n", err)
 			os.Exit(1)
 		}
 		tr = ot
-	} else {
-		tr = transport.NewTCPTransport()
+	case "bluetooth":
+		tr = transport.NewBluetoothTransport(*targetAddr)
+	default:
+		fmt.Printf("Error: unsupported transport type '%s'. Supported types: 'onion', 'bluetooth'\n", *transportType)
+		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

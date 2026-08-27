@@ -42,7 +42,7 @@ go build -o bin/palagos-server ./cmd/palagos-server
 
 ### 3. Start Zero-Trust Relay Server
 ```bash
-./bin/palagos-server -addr 0.0.0.0:8080 -transport tcp
+./bin/palagos-server -addr 0.0.0.0:8080 -transport onion
 ```
 
 ---
@@ -89,10 +89,10 @@ Palagos cryptographically decouples peer identities, session ratchets, binary pa
 +-----------------------------------------------------------------------+
 |                      Transport Abstraction Layer                      |
 |                                                                       |
-|   +---------------+   +---------------+   +-----------------------+   |
-|   | TCP Socket    |   | Tor .onion    |   | Bluetooth / Mesh Stub |   |
-|   | (IP Network)  |   | (SOCKS5 Proxy)|   | (Local P2P / Radio)   |   |
-|   +---------------+   +---------------+   +-----------------------+   |
+|   +-----------------------+   +-----------------------+               |
+|   | Tor .onion Sockets    |   | Bluetooth RFCOMM      |               |
+|   | (Anonymity Overlay)   |   | (Local Direct P2P)    |               |
+|   +-----------------------+   +-----------------------+               |
 +-----------------------------------------------------------------------+
 ```
 
@@ -100,7 +100,7 @@ Palagos cryptographically decouples peer identities, session ratchets, binary pa
 
 1. **Zero-Trust Relay Model**: Relay servers hold zero decryption keys and zero user private keys. The server acts strictly as a store-and-forward mailbox relay. Headers are tamper-proofed via Associated Authenticated Data (AAD).
 2. **Double Ratchet Key Evolution**: Provides both **Forward Secrecy (FS)** (past messages cannot be decrypted if keys are compromised today) and **Post-Compromise Security (PCS)** (sessions self-heal when a new ephemeral key arrives).
-3. **Transport Independence**: The core engine operates over standard TCP or anonymous **Tor `.onion` SOCKS5 proxies**, hiding IP metadata and bypassing NAT firewalls.
+3. **Transport Independence**: The core engine operates over anonymous **Tor `.onion` SOCKS5 proxies** or **Bluetooth RFCOMM**, hiding IP metadata and bypassing NAT firewalls or network censorship.
 4. **Out-of-Band Verification**: Peers exchange long-term identity fingerprints in person (via hexadecimal strings or QR codes) to eliminate Man-in-the-Middle (MITM) risks.
 
 ---
@@ -116,7 +116,7 @@ Pelagos/
 │   ├── crypto/              # CSPRNG, X25519, Ed25519, HKDF, AEAD, Double Ratchet
 │   ├── identity/            # Ed25519 Identity, Fingerprinting, QR code export
 │   ├── protocol/            # Binary Packet Encoding, Replay Window, Session State
-│   ├── transport/           # Abstract Transport, TCP, Tor .onion, Bluetooth/Mesh stubs
+│   ├── transport/           # Abstract Transport, Tor .onion, Bluetooth RFCOMM
 │   └── server/              # Zero-Trust Store-and-Forward Relay Server
 ├── tests/                   # Crypto unit tests, protocol tests, Go fuzz tests
 ├── docs/                    # Dedicated specifications & mathematical proofs
@@ -147,8 +147,8 @@ Pelagos/
 ### Running the Relay Server
 
 ```bash
-# Start a TCP relay server listener
-./bin/palagos-server -addr 0.0.0.0:8080 -transport tcp
+# Start a relay server listener (via Tor .onion or Bluetooth)
+./bin/palagos-server -addr 0.0.0.0:8080 -transport onion
 ```
 
 ### Messaging over Tor `.onion` Overlay

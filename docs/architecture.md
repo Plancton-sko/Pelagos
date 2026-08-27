@@ -45,10 +45,10 @@ Palagos is designed around strict separation of cryptographic identity, session 
 +-----------------------------------------------------------------------+
 |                      Transport Abstraction Layer                      |
 |                                                                       |
-|   +---------------+   +---------------+   +-----------------------+   |
-|   | TCP Socket    |   | Tor .onion    |   | Bluetooth / Mesh Stub |   |
-|   | (IP Network)  |   | (SOCKS5 Proxy)|   | (Local P2P / Radio)   |   |
-|   +---------------+   +---------------+   +-----------------------+   |
+|   +-----------------------+   +-----------------------+               |
+|   | Tor .onion Sockets    |   | Bluetooth RFCOMM      |               |
+|   | (SOCKS5 Proxy / Tor)  |   | (Local Direct P2P)    |               |
+|   +-----------------------+   +-----------------------+               |
 +-----------------------------------------------------------------------+
 ```
 
@@ -74,4 +74,4 @@ Palagos is designed around strict separation of cryptographic identity, session 
 
 ### D. Transport Layer (`pkg/transport`)
 - **Responsibility**: Delivers binary Palagos frames over physical or virtual network channels.
-- **Transport Independence**: The cryptographic layer treats the transport as an untrusted byte pipe. Replacing TCP with Tor `.onion` SOCKS5 or Bluetooth RFCOMM requires zero changes to key derivation or packet format.
+- **Transport Independence**: The cryptographic layer treats the transport as an untrusted byte pipe. Replacing Tor `.onion` SOCKS5 with Bluetooth RFCOMM requires zero changes to key derivation or packet format.
