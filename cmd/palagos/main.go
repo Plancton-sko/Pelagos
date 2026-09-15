@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"palagos/pkg/identity"
@@ -69,6 +71,7 @@ func handleListen(args []string) {
 	transportType := fs.String("transport", "onion", "Transport type: 'onion' or 'bluetooth'")
 	socksAddr := fs.String("socks", "127.0.0.1:9050", "Tor SOCKS5 proxy address (for 'onion' transport)")
 	privKeyHex := fs.String("key", "", "Hex-encoded 64-byte Ed25519 private key")
+	peerPubHex := fs.String("peer-pub", "", "Remote peer Ed25519 public key in hex (for session establishment)")
 
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
@@ -88,6 +91,21 @@ func handleListen(args []string) {
 	localId := &identity.Identity{
 		PrivateKey: privBytes,
 		PublicKey:  privBytes[32:],
+	}
+
+	// Peer identity is optional for listen mode (can be set after handshake)
+	var peerId *identity.PeerIdentity
+	if *peerPubHex != "" {
+		peerPubBytes, err := hex.DecodeString(*peerPubHex)
+		if err != nil || len(peerPubBytes) != 32 {
+			fmt.Printf("Error: invalid peer public key hex: %v\n", err)
+			os.Exit(1)
+		}
+		peerId, err = identity.NewPeerIdentity(peerPubBytes, "remote-peer")
+		if err != nil {
+			fmt.Printf("Error creating peer identity: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	var tr transport.Transport
@@ -122,29 +140,84 @@ func handleListen(args []string) {
 			fmt.Printf("Accept error: %v\n", err)
 			continue
 		}
-		go handleIncomingConn(localId, conn)
+		go handleIncomingConn(localId, peerId, conn)
 	}
 }
 
-func handleIncomingConn(localId *identity.Identity, conn transport.Conn) {
+// handleIncomingConn performs the full handshake as responder (Bob) and then
+// receives and decrypts incoming messages, printing each to stdout.
+func handleIncomingConn(localId *identity.Identity, peerId *identity.PeerIdentity, conn transport.Conn) {
 	defer conn.Close()
 	fmt.Printf("[+] Incoming connection from %s\n", conn.RemoteAddr())
 
-	// Read first packet (HandshakeInit or Data)
-	rawPkt, err := conn.ReceivePacket()
+	// 1. Read HandshakeInit
+	rawInit, err := conn.ReceivePacket()
 	if err != nil {
-		fmt.Printf("[-] Error receiving packet: %v\n", err)
+		fmt.Printf("[-] Error receiving HandshakeInit: %v\n", err)
 		return
 	}
 
-	var pkt protocol.Packet
-	if err := pkt.Unmarshal(rawPkt); err != nil {
-		fmt.Printf("[-] Error parsing packet: %v\n", err)
+	var initPkt protocol.Packet
+	if err := initPkt.Unmarshal(rawInit); err != nil {
+		fmt.Printf("[-] Error parsing HandshakeInit: %v\n", err)
 		return
 	}
 
-	fmt.Printf("[+] Received packet: Type 0x%02x, Version 0x%04x, Sequence %d, Sender FP: %x\n",
-		pkt.Type, pkt.Version, pkt.Sequence, pkt.SenderFingerprint[:8])
+	if initPkt.Type != 0x01 { // MessageTypeHandshakeInit
+		fmt.Printf("[-] Expected HandshakeInit, got type 0x%02x\n", initPkt.Type)
+		return
+	}
+
+	// If no peer identity was configured ahead of time, derive it from the packet's SenderFingerprint.
+	// NOTE: This accepts any peer. For production, always pass -peer-pub for pinned verification.
+	if peerId == nil {
+		fmt.Printf("[!] Warning: no peer identity pinned (-peer-pub). Accepting anonymous peer FP: %x\n", initPkt.SenderFingerprint[:8])
+		peerId = &identity.PeerIdentity{PublicKey: initPkt.Payload[:32]}
+	}
+
+	// 2. Process HandshakeInit -> produce HandshakeResp
+	session := protocol.NewSession(localId, peerId)
+	respPkt, err := session.ProcessHandshakeInit(&initPkt)
+	if err != nil {
+		fmt.Printf("[-] HandshakeInit processing failed: %v\n", err)
+		return
+	}
+
+	respBytes, err := respPkt.Marshal()
+	if err != nil {
+		fmt.Printf("[-] Failed to marshal HandshakeResp: %v\n", err)
+		return
+	}
+
+	if err := conn.SendPacket(respBytes); err != nil {
+		fmt.Printf("[-] Failed to send HandshakeResp: %v\n", err)
+		return
+	}
+
+	fmt.Printf("[+] Session established with %x\n", initPkt.SenderFingerprint[:8])
+
+	// 3. Receive loop: decrypt and print incoming data messages
+	for {
+		rawData, err := conn.ReceivePacket()
+		if err != nil {
+			fmt.Printf("[-] Connection closed: %v\n", err)
+			return
+		}
+
+		var dataPkt protocol.Packet
+		if err := dataPkt.Unmarshal(rawData); err != nil {
+			fmt.Printf("[-] Error parsing data packet: %v\n", err)
+			continue
+		}
+
+		plaintext, err := session.DecryptMessage(&dataPkt)
+		if err != nil {
+			fmt.Printf("[-] Decryption failed (seq=%d): %v\n", dataPkt.Sequence, err)
+			continue
+		}
+
+		fmt.Printf("[MSG seq=%d] %s\n", dataPkt.Sequence, string(plaintext))
+	}
 }
 
 func handleSend(args []string) {
@@ -154,7 +227,7 @@ func handleSend(args []string) {
 	socksAddr := fs.String("socks", "127.0.0.1:9050", "Tor SOCKS5 proxy address")
 	privKeyHex := fs.String("key", "", "Local Ed25519 private key in hex")
 	peerPubHex := fs.String("peer-pub", "", "Remote peer Ed25519 public key in hex")
-	message := fs.String("msg", "Hello from Palagos over encrypted P2P!", "Plaintext message to send")
+	message := fs.String("msg", "", "Single plaintext message to send (omit for interactive stdin mode)")
 
 	if err := fs.Parse(args); err != nil {
 		os.Exit(1)
@@ -204,7 +277,7 @@ func handleSend(args []string) {
 		os.Exit(1)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	fmt.Printf("[+] Connecting to peer %s via %s transport...\n", *targetAddr, *transportType)
@@ -215,7 +288,7 @@ func handleSend(args []string) {
 	}
 	defer conn.Close()
 
-	// Perform handshake and session establishment
+	// 1. Perform handshake as initiator (Alice)
 	session := protocol.NewSession(localId, peerId)
 	initPkt, ephemeralPriv, err := session.CreateHandshakeInit()
 	if err != nil {
@@ -230,11 +303,71 @@ func handleSend(args []string) {
 	}
 
 	if err := conn.SendPacket(initBytes); err != nil {
-		fmt.Printf("[-] Sending handshake packet failed: %v\n", err)
+		fmt.Printf("[-] Sending HandshakeInit failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("[+] HandshakeInit sent (%d bytes). Waiting for response...\n", len(initBytes))
+
+	// 2. Receive and process HandshakeResp
+	rawResp, err := conn.ReceivePacket()
+	if err != nil {
+		fmt.Printf("[-] Failed to receive HandshakeResp: %v\n", err)
 		os.Exit(1)
 	}
 
-	_ = ephemeralPriv
-	fmt.Printf("[+] HandshakeInit sent to peer (%d bytes)\n", len(initBytes))
-	fmt.Printf("[+] Encrypted message ready: \"%s\"\n", *message)
+	var respPkt protocol.Packet
+	if err := respPkt.Unmarshal(rawResp); err != nil {
+		fmt.Printf("[-] Failed to parse HandshakeResp: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := session.CompleteInitiatorHandshake(&respPkt, ephemeralPriv); err != nil {
+		fmt.Printf("[-] Handshake completion failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("[+] Secure session established with %x\n", respPkt.SenderFingerprint[:8])
+
+	// 3a. Single-shot mode: -msg flag provided
+	if *message != "" {
+		sendEncryptedMessage(session, conn, *message)
+		return
+	}
+
+	// 3b. Interactive stdin mode: read lines and send each as an encrypted message
+	fmt.Println("[+] Interactive mode. Type messages and press Enter to send. Ctrl+C to quit.")
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Print("> ")
+		if !scanner.Scan() {
+			break
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		sendEncryptedMessage(session, conn, line)
+	}
+}
+
+// sendEncryptedMessage encrypts and sends a single plaintext message over the established session.
+func sendEncryptedMessage(session *protocol.Session, conn transport.Conn, plaintext string) {
+	dataPkt, err := session.EncryptMessage([]byte(plaintext))
+	if err != nil {
+		fmt.Printf("[-] Encryption failed: %v\n", err)
+		return
+	}
+
+	dataBytes, err := dataPkt.Marshal()
+	if err != nil {
+		fmt.Printf("[-] Serialization failed: %v\n", err)
+		return
+	}
+
+	if err := conn.SendPacket(dataBytes); err != nil {
+		fmt.Printf("[-] Send failed: %v\n", err)
+		return
+	}
+
+	fmt.Printf("[+] Sent (seq=%d, %d bytes encrypted)\n", dataPkt.Sequence, len(dataBytes))
 }

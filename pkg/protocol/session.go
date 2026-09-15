@@ -276,7 +276,13 @@ func (s *Session) DecryptMessage(pkt *Packet) ([]byte, error) {
 		return nil, fmt.Errorf("session: packet identity signature verification failed")
 	}
 
-	// Reconstruct nonce + payload slice for RatchetDecrypt
+	// Reconstruct nonce + payload slice for RatchetDecrypt.
+	// NOTE: We pass sequence=0 here because pkt.Sequence is the global session sequence
+	// (monotonic across the whole session), while RatchetDecrypt's sequence parameter
+	// tracks position *within a single chain epoch*. The ratchet chain advances by 1 per
+	// call; in-order delivery (guaranteed by TCP/Onion transport) means no skipping is
+	// needed. Out-of-order support requires a separate per-chain sequence field in the
+	// wire format, which is a future protocol extension.
 	fullCiphertext := append(pkt.Nonce[:], pkt.Payload...)
 	aad := pkt.ComputeAAD()
 

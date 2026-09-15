@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  palagos-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: palagos-relay-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - tor_data:/var/lib/tor
+
+volumes:
+  tor_data:

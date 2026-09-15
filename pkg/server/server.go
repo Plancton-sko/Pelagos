@@ -4,12 +4,23 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"sync"
+	"time"
 
 	"palagos/pkg/crypto"
 	"palagos/pkg/identity"
 	"palagos/pkg/protocol"
 	"palagos/pkg/transport"
 )
+
+// MailboxTTL is the maximum duration a mailbox entry is retained when a client is offline.
+// After this period, queued packets are dropped to prevent unbounded memory growth.
+const MailboxTTL = 72 * time.Hour
+
+// mailboxEntry holds queued offline packets alongside a timestamp for TTL-based eviction.
+type mailboxEntry struct {
+	packets   [][]byte
+	createdAt time.Time
+}
 
 // Server represents a zero-trust Palagos rendezvous and relay server.
 //
@@ -21,25 +32,64 @@ import (
 // 3. Server Identity Authentication: The server holds an Ed25519 identity key. Clients authenticate the server
 //    via challenge-response during connection establishment to prevent rogue server spoofing / DNS hijacking.
 type Server struct {
-	mu           sync.Mutex
-	ServerId     *identity.Identity
-	mailboxes    map[[32]byte][][]byte // Map: Recipient Fingerprint -> Queue of binary Palagos packets
-	clients      map[[32]byte]transport.Conn
-	transports   []transport.Transport
+	mu         sync.Mutex
+	ServerId   *identity.Identity
+	mailboxes  map[[32]byte]*mailboxEntry // Map: Recipient Fingerprint -> mailbox entry with TTL
+	clients    map[[32]byte]transport.Conn
+	transports []transport.Transport
+	stopGC     chan struct{}
 }
 
-// NewServer initializes a new relay server with a fresh Ed25519 server identity keypair.
+// NewServer initializes a new relay server with a fresh Ed25519 server identity keypair
+// and starts a background goroutine for periodic mailbox garbage collection.
 func NewServer() (*Server, error) {
 	serverId, err := identity.GenerateIdentity()
 	if err != nil {
 		return nil, fmt.Errorf("server: failed to generate server identity: %w", err)
 	}
 
-	return &Server{
+	s := &Server{
 		ServerId:  serverId,
-		mailboxes: make(map[[32]byte][][]byte),
+		mailboxes: make(map[[32]byte]*mailboxEntry),
 		clients:   make(map[[32]byte]transport.Conn),
-	}, nil
+		stopGC:    make(chan struct{}),
+	}
+
+	go s.runMailboxGC()
+
+	return s, nil
+}
+
+// runMailboxGC periodically evicts expired mailbox entries to prevent unbounded memory growth.
+// Runs every hour and purges any entry older than MailboxTTL.
+func (s *Server) runMailboxGC() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.evictExpiredMailboxes()
+		case <-s.stopGC:
+			return
+		}
+	}
+}
+
+// evictExpiredMailboxes removes mailbox entries whose TTL has been exceeded.
+func (s *Server) evictExpiredMailboxes() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := time.Now().Add(-MailboxTTL)
+	for fp, entry := range s.mailboxes {
+		if entry.createdAt.Before(cutoff) {
+			delete(s.mailboxes, fp)
+		}
+	}
+}
+
+// Shutdown signals the background GC goroutine to stop cleanly.
+func (s *Server) Shutdown() {
+	close(s.stopGC)
 }
 
 // AuthenticateClient performs challenge-response to prove server identity to client.
@@ -99,31 +149,44 @@ func (s *Server) RoutePacket(rawPacket []byte) error {
 			// If send fails, push to offline mailbox
 			s.mu.Lock()
 			delete(s.clients, recipientFP)
-			s.mailboxes[recipientFP] = append(s.mailboxes[recipientFP], rawPacket)
+			s.enqueueMailbox(recipientFP, rawPacket)
 			s.mu.Unlock()
 		}
 		return nil
 	}
 
 	// Recipient is offline: store in mailbox
-	s.mailboxes[recipientFP] = append(s.mailboxes[recipientFP], rawPacket)
+	s.enqueueMailbox(recipientFP, rawPacket)
 	s.mu.Unlock()
 
 	return nil
 }
 
+// enqueueMailbox appends a packet to a recipient's mailbox, creating the entry if needed.
+// Caller must hold s.mu.
+func (s *Server) enqueueMailbox(fp [32]byte, rawPacket []byte) {
+	entry, exists := s.mailboxes[fp]
+	if !exists {
+		entry = &mailboxEntry{createdAt: time.Now()}
+		s.mailboxes[fp] = entry
+	}
+	entry.packets = append(entry.packets, rawPacket)
+}
+
 // DeliverMailbox flushes all pending offline packets to a newly reconnected client.
 func (s *Server) DeliverMailbox(clientFP [32]byte, conn transport.Conn) error {
 	s.mu.Lock()
-	packets, hasMail := s.mailboxes[clientFP]
-	delete(s.mailboxes, clientFP)
+	entry, hasMail := s.mailboxes[clientFP]
+	if hasMail {
+		delete(s.mailboxes, clientFP)
+	}
 	s.mu.Unlock()
 
 	if !hasMail {
 		return nil
 	}
 
-	for _, rawPkt := range packets {
+	for _, rawPkt := range entry.packets {
 		if err := conn.SendPacket(rawPkt); err != nil {
 			return fmt.Errorf("server: failed delivering mailbox packet: %w", err)
 		}
