@@ -1,6 +1,7 @@
 package client
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -135,6 +136,28 @@ func (ws *WebServer) handleContacts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (ws *WebServer) resolveFingerprint(fpHex string) ([32]byte, error) {
+	bytes, err := hex.DecodeString(fpHex)
+	if err != nil || len(bytes) != 32 {
+		return [32]byte{}, fmt.Errorf("invalid hex string length")
+	}
+	var arr [32]byte
+	copy(arr[:], bytes)
+
+	// Check if arr is directly a known contact fingerprint
+	if _, ok := ws.Manager.GetContactByFP(arr); ok {
+		return arr, nil
+	}
+
+	// Check if arr is a public key whose SHA-256 is a known contact fingerprint
+	hashed := sha256.Sum256(bytes)
+	if _, ok := ws.Manager.GetContactByFP(hashed); ok {
+		return hashed, nil
+	}
+
+	return arr, nil
+}
+
 func (ws *WebServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -146,14 +169,11 @@ func (ws *WebServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		fpBytes, err := hex.DecodeString(fpHex)
-		if err != nil || len(fpBytes) != 32 {
+		peerFP, err := ws.resolveFingerprint(fpHex)
+		if err != nil {
 			http.Error(w, "invalid peer_fp", http.StatusBadRequest)
 			return
 		}
-
-		var peerFP [32]byte
-		copy(peerFP[:], fpBytes)
 
 		msgs := ws.Manager.GetMessages(peerFP)
 		json.NewEncoder(w).Encode(msgs)
@@ -168,14 +188,11 @@ func (ws *WebServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		fpBytes, err := hex.DecodeString(req.PeerFPHex)
-		if err != nil || len(fpBytes) != 32 {
+		peerFP, err := ws.resolveFingerprint(req.PeerFPHex)
+		if err != nil {
 			http.Error(w, "invalid peer_fp", http.StatusBadRequest)
 			return
 		}
-
-		var peerFP [32]byte
-		copy(peerFP[:], fpBytes)
 
 		// Record sent message locally
 		msg := ws.Manager.AddMessage(peerFP, req.Content, true, 0)

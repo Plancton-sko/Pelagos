@@ -86,6 +86,10 @@ func (s *Session) ProcessHandshakeInit(pkt *Packet) (*Packet, error) {
 		return nil, fmt.Errorf("session: expected HandshakeInit message type, got 0x%02x", pkt.Type)
 	}
 
+	if s.PeerId == nil {
+		return nil, fmt.Errorf("session: cannot process handshake init, peer identity is nil")
+	}
+
 	// 1. Verify packet signature under peer's identity key
 	if !s.PeerId.VerifySignature(pkt.SignedBytes(), pkt.Signature[:]) {
 		return nil, fmt.Errorf("session: handshake packet signature verification failed")

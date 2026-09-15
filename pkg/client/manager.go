@@ -122,7 +122,7 @@ func (m *Manager) SaveContact(pubKeyBytes []byte, customAlias string, onionAddr 
 		CustomAlias:  customAlias,
 		OnionAddress: onionAddr,
 		PeerIdentity: peerId,
-		CreatedAt:    time.Time{},
+		CreatedAt:    time.Now(),
 	}
 
 	m.Contacts[fp] = c

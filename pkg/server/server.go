@@ -177,20 +177,39 @@ func (s *Server) enqueueMailbox(fp [32]byte, rawPacket []byte) {
 func (s *Server) DeliverMailbox(clientFP [32]byte, conn transport.Conn) error {
 	s.mu.Lock()
 	entry, hasMail := s.mailboxes[clientFP]
-	if hasMail {
-		delete(s.mailboxes, clientFP)
-	}
-	s.mu.Unlock()
-
-	if !hasMail {
+	if !hasMail || len(entry.packets) == 0 {
+		s.mu.Unlock()
 		return nil
 	}
+	// Copy slice under lock so we don't block other routines during network IO
+	pkts := make([][]byte, len(entry.packets))
+	copy(pkts, entry.packets)
+	s.mu.Unlock()
 
-	for _, rawPkt := range entry.packets {
+	sentCount := 0
+	for _, rawPkt := range pkts {
 		if err := conn.SendPacket(rawPkt); err != nil {
-			return fmt.Errorf("server: failed delivering mailbox packet: %w", err)
+			// Put unsent packets back into mailbox on send failure
+			s.mu.Lock()
+			if curEntry, ok := s.mailboxes[clientFP]; ok {
+				curEntry.packets = append(pkts[sentCount:], curEntry.packets...)
+			} else {
+				s.mailboxes[clientFP] = &mailboxEntry{
+					packets:   pkts[sentCount:],
+					createdAt: time.Now(),
+				}
+			}
+			s.mu.Unlock()
+			return fmt.Errorf("server: failed delivering mailbox packet at index %d: %w", sentCount, err)
 		}
+		sentCount++
 	}
+
+	// All packets delivered successfully, remove from mailbox
+	s.mu.Lock()
+	delete(s.mailboxes, clientFP)
+	s.mu.Unlock()
+
 	return nil
 }
 
