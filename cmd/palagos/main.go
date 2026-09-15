@@ -29,6 +29,10 @@ func main() {
 		handleListen(os.Args[2:])
 	case "send":
 		handleSend(os.Args[2:])
+	case "pair-create":
+		handlePairCreate(os.Args[2:])
+	case "pair-open":
+		handlePairOpen(os.Args[2:])
 	default:
 		fmt.Printf("Unknown command: %s\n", subcommand)
 		printUsage()
@@ -42,6 +46,8 @@ func printUsage() {
 	fmt.Println("  palagos gen-identity                  Generate a fresh Ed25519 identity keypair")
 	fmt.Println("  palagos listen [options]              Start a Palagos peer listener daemon")
 	fmt.Println("  palagos send [options]                Send an encrypted message to a remote peer")
+	fmt.Println("  palagos pair-create [options]         Create a PIN-encrypted pairing payload (Camera-free key exchange)")
+	fmt.Println("  palagos pair-open [options]           Open a PIN-encrypted pairing payload and generate 6-digit SAS code")
 }
 
 func handleGenIdentity() {
@@ -371,3 +377,110 @@ func sendEncryptedMessage(session *protocol.Session, conn transport.Conn, plaint
 
 	fmt.Printf("[+] Sent (seq=%d, %d bytes encrypted)\n", dataPkt.Sequence, len(dataBytes))
 }
+
+func handlePairCreate(args []string) {
+	fs := flag.NewFlagSet("pair-create", flag.ExitOnError)
+	privKeyHex := fs.String("key", "", "Local Ed25519 private key in hex")
+	pin := fs.String("pin", "", "Agreed 4 to 6-digit PIN for presential pairing")
+	alias := fs.String("alias", "MyDevice", "Local device alias")
+
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	if *privKeyHex == "" || *pin == "" {
+		fmt.Println("Error: -key and -pin flags are required.")
+		os.Exit(1)
+	}
+
+	privBytes, err := hex.DecodeString(*privKeyHex)
+	if err != nil || len(privBytes) != 64 {
+		fmt.Printf("Error decoding private key: %v\n", err)
+		os.Exit(1)
+	}
+
+	localId := &identity.Identity{
+		PrivateKey: privBytes,
+		PublicKey:  privBytes[32:],
+	}
+
+	payload, err := identity.CreatePairingPayload(localId, *alias, *pin)
+	if err != nil {
+		fmt.Printf("Error creating pairing payload: %v\n", err)
+		os.Exit(1)
+	}
+
+	rawBytes := payload.Marshal()
+	payloadHex := hex.EncodeToString(rawBytes)
+
+	fmt.Println("=================================================================")
+	fmt.Println("         		PALAGOS PRESENTIAL PAIRING PAYLOAD 		   	      ")
+	fmt.Println("=================================================================")
+	fmt.Printf("Device Fingerprint: %s\n", localId.FormattedFingerprint())
+	fmt.Printf("Device Alias:       %s\n", *alias)
+	fmt.Printf("Shared PIN:         %s\n", *pin)
+	fmt.Println("-----------------------------------------------------------------")
+	fmt.Println("Pairing Payload (Hex):")
+	fmt.Println(payloadHex)
+	fmt.Println("=================================================================")
+	fmt.Println("\nTransmit this payload over Bluetooth or local channel to your peer.")
+}
+
+func handlePairOpen(args []string) {
+	fs := flag.NewFlagSet("pair-open", flag.ExitOnError)
+	privKeyHex := fs.String("key", "", "Local Ed25519 private key in hex")
+	pin := fs.String("pin", "", "Agreed 4 to 6-digit PIN for presential pairing")
+	payloadHex := fs.String("payload", "", "Hex-encoded pairing payload received from peer")
+
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	if *privKeyHex == "" || *pin == "" || *payloadHex == "" {
+		fmt.Println("Error: -key, -pin, and -payload flags are required.")
+		os.Exit(1)
+	}
+
+	privBytes, err := hex.DecodeString(*privKeyHex)
+	if err != nil || len(privBytes) != 64 {
+		fmt.Printf("Error decoding private key: %v\n", err)
+		os.Exit(1)
+	}
+
+	localId := &identity.Identity{
+		PrivateKey: privBytes,
+		PublicKey:  privBytes[32:],
+	}
+
+	rawBytes, err := hex.DecodeString(*payloadHex)
+	if err != nil {
+		fmt.Printf("Error decoding payload hex: %v\n", err)
+		os.Exit(1)
+	}
+
+	payload, err := identity.UnmarshalPairingPayload(rawBytes)
+	if err != nil {
+		fmt.Printf("Error parsing pairing payload: %v\n", err)
+		os.Exit(1)
+	}
+
+	peerId, sasCode, err := identity.OpenPairingPayload(payload, localId, *pin)
+	if err != nil {
+		fmt.Printf("[-] Pairing failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	peerPubHex := hex.EncodeToString(peerId.PublicKey)
+
+	fmt.Println("=================================================================")
+	fmt.Println("         		PALAGOS PRESENTIAL PAIRING SUCCESS     		      ")
+	fmt.Println("=================================================================")
+	fmt.Printf("Peer Device Alias:   %s\n", peerId.Alias)
+	fmt.Printf("Peer Public Key Hex: %s\n", peerPubHex)
+	fmt.Printf("Peer Fingerprint:    %s\n", peerId.FormattedFingerprint())
+	fmt.Println("-----------------------------------------------------------------")
+	fmt.Printf("SAS CONFIRMATION CODE:  [ %s ]\n", sasCode)
+	fmt.Println("=================================================================")
+	fmt.Println("\n[SECURITY VERIFICATION] Confirm that the 6-digit SAS code matches on both screens!")
+}
+

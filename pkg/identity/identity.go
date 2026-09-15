@@ -80,7 +80,19 @@ func (p *PeerIdentity) Fingerprint() [32]byte {
 	return sha256.Sum256(p.PublicKey)
 }
 
+// FormattedFingerprint returns a colon-separated hex string for human/visual verification.
+func (p *PeerIdentity) FormattedFingerprint() string {
+	fp := p.Fingerprint()
+	hexStr := strings.ToUpper(hex.EncodeToString(fp[:]))
+	var parts []string
+	for i := 0; i < len(hexStr); i += 2 {
+		parts = append(parts, hexStr[i:i+2])
+	}
+	return strings.Join(parts, ":")
+}
+
 // VerifySignature checks a signature against the peer's long-term public identity key.
 func (p *PeerIdentity) VerifySignature(message, signature []byte) bool {
 	return crypto.VerifySignature(p.PublicKey, message, signature)
 }
+
