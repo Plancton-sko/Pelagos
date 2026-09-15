@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"palagos/pkg/client"
 	"palagos/pkg/identity"
 	"palagos/pkg/protocol"
 	"palagos/pkg/transport"
@@ -33,6 +34,8 @@ func main() {
 		handlePairCreate(os.Args[2:])
 	case "pair-open":
 		handlePairOpen(os.Args[2:])
+	case "ui":
+		handleUI(os.Args[2:])
 	default:
 		fmt.Printf("Unknown command: %s\n", subcommand)
 		printUsage()
@@ -48,6 +51,7 @@ func printUsage() {
 	fmt.Println("  palagos send [options]                Send an encrypted message to a remote peer")
 	fmt.Println("  palagos pair-create [options]         Create a PIN-encrypted pairing payload (Camera-free key exchange)")
 	fmt.Println("  palagos pair-open [options]           Open a PIN-encrypted pairing payload and generate 6-digit SAS code")
+	fmt.Println("  palagos ui [options]                  Launch embedded Midnight Blue Web UI server")
 }
 
 func handleGenIdentity() {
@@ -483,4 +487,36 @@ func handlePairOpen(args []string) {
 	fmt.Println("=================================================================")
 	fmt.Println("\n[SECURITY VERIFICATION] Confirm that the 6-digit SAS code matches on both screens!")
 }
+
+func handleUI(args []string) {
+	fs := flag.NewFlagSet("ui", flag.ExitOnError)
+	port := fs.String("port", "4040", "HTTP port for local Web UI server")
+	socksAddr := fs.String("socks", "127.0.0.1:9050", "Tor SOCKS5 proxy address")
+
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	mgr, err := client.NewManager(*socksAddr)
+	if err != nil {
+		fmt.Printf("Error starting client manager: %v\n", err)
+		os.Exit(1)
+	}
+
+	listenAddr := fmt.Sprintf("127.0.0.1:%s", *port)
+	server := client.NewWebServer(mgr, listenAddr)
+
+	fmt.Println("=================================================================")
+	fmt.Println("           PALAGOS EMBEDDED WEB UI (DISCORD & TELEGRAM STYLE)   ")
+	fmt.Println("=================================================================")
+	fmt.Printf("Web Interface URL:  http://%s\n", listenAddr)
+	fmt.Printf("Tor SOCKS5 Proxy:  %s\n", *socksAddr)
+	fmt.Println("=================================================================")
+
+	if err := server.Start(); err != nil {
+		fmt.Printf("Web UI server error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 
