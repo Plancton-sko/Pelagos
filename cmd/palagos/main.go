@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"palagos/pkg/client"
+	"palagos/pkg/daemon"
 	"palagos/pkg/identity"
 	"palagos/pkg/protocol"
 	"palagos/pkg/transport"
@@ -36,6 +37,8 @@ func main() {
 		handlePairOpen(os.Args[2:])
 	case "ui":
 		handleUI(os.Args[2:])
+	case "daemon":
+		handleDaemon(os.Args[2:])
 	default:
 		fmt.Printf("Unknown command: %s\n", subcommand)
 		printUsage()
@@ -52,6 +55,7 @@ func printUsage() {
 	fmt.Println("  palagos pair-create [options]         Create a PIN-encrypted pairing payload (Camera-free key exchange)")
 	fmt.Println("  palagos pair-open [options]           Open a PIN-encrypted pairing payload and generate 6-digit SAS code")
 	fmt.Println("  palagos ui [options]                  Launch embedded Midnight Blue Web UI server")
+	fmt.Println("  palagos daemon [options]              Start local IPC/RPC engine daemon for native UI applications")
 }
 
 func handleGenIdentity() {
@@ -518,5 +522,34 @@ func handleUI(args []string) {
 		os.Exit(1)
 	}
 }
+
+func handleDaemon(args []string) {
+	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+	rpcPort := fs.String("rpc", "5050", "TCP port for local IPC/RPC engine daemon")
+	socksAddr := fs.String("socks", "127.0.0.1:9050", "Tor SOCKS5 proxy address")
+
+	if err := fs.Parse(args); err != nil {
+		os.Exit(1)
+	}
+
+	mgr, err := client.NewManager(*socksAddr)
+	if err != nil {
+		fmt.Printf("Error starting client manager: %v\n", err)
+		os.Exit(1)
+	}
+
+	listenAddr := fmt.Sprintf("127.0.0.1:%s", *rpcPort)
+	d, err := daemon.NewDaemon(mgr, listenAddr)
+	if err != nil {
+		fmt.Printf("Error creating daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := d.Start(); err != nil {
+		fmt.Printf("Daemon error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 
 

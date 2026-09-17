@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,25 +14,33 @@ import (
 	"palagos/pkg/transport"
 )
 
+// ConnectionMode specifies whether the client routes messages via a Relay Server or Direct P2P.
+type ConnectionMode string
+
+const (
+	ModeRelay     ConnectionMode = "relay"      // Relay Server Store-and-Forward mode
+	ModeDirectP2P ConnectionMode = "direct_p2p" // Direct Peer-to-Peer Onion/TCP mode
+)
+
 // Contact represents a remote peer saved in the local contact book.
 type Contact struct {
-	Fingerprint  [32]byte          `json:"fingerprint"`
-	FormattedFP  string            `json:"formatted_fingerprint"`
-	PublicKeyHex string            `json:"public_key_hex"`
-	CustomAlias  string            `json:"custom_alias"` // Custom user-defined name/alias
-	OnionAddress string            `json:"onion_address"`
+	Fingerprint  [32]byte               `json:"fingerprint"`
+	FormattedFP  string                 `json:"formatted_fingerprint"`
+	PublicKeyHex string                 `json:"public_key_hex"`
+	CustomAlias  string                 `json:"custom_alias"` // Custom user-defined name/alias
+	OnionAddress string                 `json:"onion_address"`
 	PeerIdentity *identity.PeerIdentity `json:"-"`
-	CreatedAt    time.Time         `json:"created_at"`
+	CreatedAt    time.Time              `json:"created_at"`
 }
 
 // Message represents an encrypted or decrypted chat message in memory.
 type Message struct {
-	ID        string    `json:"id"`
-	SenderFP  string    `json:"sender_fp"`
-	SenderIsMe bool     `json:"sender_is_me"`
-	Content   string    `json:"content"`
-	Sequence  uint64    `json:"sequence"`
-	Timestamp time.Time `json:"timestamp"`
+	ID         string    `json:"id"`
+	SenderFP   string    `json:"sender_fp"`
+	SenderIsMe bool      `json:"sender_is_me"`
+	Content    string    `json:"content"`
+	Sequence   uint64    `json:"sequence"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
 // Manager orchestrates multiple local identities, contacts, and active Double Ratchet sessions.
@@ -39,12 +48,15 @@ type Manager struct {
 	mu             sync.RWMutex
 	Identities     map[string]*identity.Identity // Profile Name -> Local Identity
 	ActiveProfile  string
-	Contacts       map[[32]byte]*Contact         // Remote Peer FP -> Contact Info
+	Contacts       map[[32]byte]*Contact // Remote Peer FP -> Contact Info
 	Sessions       map[[32]byte]*protocol.Session
 	Messages       map[[32]byte][]Message
 	ActiveConns    map[[32]byte]transport.Conn
 	TorSocksAddr   string
+	RelayAddr      string
+	Mode           ConnectionMode
 	OnionTransport *transport.OnionTransport
+	onMessageFunc  func(peerFP [32]byte, msg Message)
 }
 
 // NewManager initializes a new Client Manager instance.
@@ -68,6 +80,7 @@ func NewManager(socksAddr string) (*Manager, error) {
 		Messages:       make(map[[32]byte][]Message),
 		ActiveConns:    make(map[[32]byte]transport.Conn),
 		TorSocksAddr:   socksAddr,
+		Mode:           ModeRelay,
 		OnionTransport: ot,
 	}
 
@@ -75,7 +88,22 @@ func NewManager(socksAddr string) (*Manager, error) {
 	return m, nil
 }
 
-// AddIdentity Profile allows generating or importing multiple local identities.
+// SetConnectionMode switches between Relay mode and Direct P2P mode.
+func (m *Manager) SetConnectionMode(mode ConnectionMode, relayAddr string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Mode = mode
+	m.RelayAddr = relayAddr
+}
+
+// SetOnMessageCallback sets a callback triggered whenever a new message is received.
+func (m *Manager) SetOnMessageCallback(callback func(peerFP [32]byte, msg Message)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onMessageFunc = callback
+}
+
+// AddIdentityProfile allows generating or importing multiple local identities.
 func (m *Manager) AddIdentityProfile(name string, id *identity.Identity) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -168,11 +196,70 @@ func (m *Manager) GetOrCreateSession(peerFP [32]byte) (*protocol.Session, error)
 	return s, nil
 }
 
-// AddMessage appends a message to a contact's history thread.
+// SendTextMessage encrypts and sends a text message to a contact over the selected mode (Relay or Direct P2P).
+func (m *Manager) SendTextMessage(ctx context.Context, peerFP [32]byte, text string) (Message, error) {
+	s, err := m.GetOrCreateSession(peerFP)
+	if err != nil {
+		return Message{}, err
+	}
+
+	dataPkt, err := s.EncryptMessage([]byte(text))
+	if err != nil {
+		return Message{}, fmt.Errorf("manager: encryption failed: %w", err)
+	}
+
+	rawBytes, err := dataPkt.Marshal()
+	if err != nil {
+		return Message{}, fmt.Errorf("manager: packet marshal failed: %w", err)
+	}
+
+	// Route based on Connection Mode
+	m.mu.RLock()
+	conn, hasConn := m.ActiveConns[peerFP]
+	targetOnion := ""
+	if c, ok := m.Contacts[peerFP]; ok {
+		targetOnion = c.OnionAddress
+	}
+	mode := m.Mode
+	relayAddr := m.RelayAddr
+	m.mu.RUnlock()
+
+	if !hasConn {
+		var dialAddr string
+		if mode == ModeRelay && relayAddr != "" {
+			dialAddr = relayAddr
+		} else if targetOnion != "" {
+			dialAddr = targetOnion
+		} else {
+			return Message{}, fmt.Errorf("manager: no connection address available for peer %x", peerFP[:8])
+		}
+
+		newConn, err := m.OnionTransport.Dial(ctx, dialAddr)
+		if err != nil {
+			return Message{}, fmt.Errorf("manager: dial failed to %s: %w", dialAddr, err)
+		}
+		conn = newConn
+
+		m.mu.Lock()
+		m.ActiveConns[peerFP] = conn
+		m.mu.Unlock()
+	}
+
+	if err := conn.SendPacket(rawBytes); err != nil {
+		m.mu.Lock()
+		delete(m.ActiveConns, peerFP)
+		m.mu.Unlock()
+		conn.Close()
+		return Message{}, fmt.Errorf("manager: send failed: %w", err)
+	}
+
+	msg := m.AddMessage(peerFP, text, true, dataPkt.Sequence)
+	return msg, nil
+}
+
+// AddMessage appends a message to a contact's history thread and triggers optional callback.
 func (m *Manager) AddMessage(peerFP [32]byte, content string, isMe bool, seq uint64) Message {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	msg := Message{
 		ID:         fmt.Sprintf("%d-%d", time.Now().UnixNano(), seq),
 		SenderFP:   hex.EncodeToString(peerFP[:]),
@@ -183,6 +270,13 @@ func (m *Manager) AddMessage(peerFP [32]byte, content string, isMe bool, seq uin
 	}
 
 	m.Messages[peerFP] = append(m.Messages[peerFP], msg)
+	cb := m.onMessageFunc
+	m.mu.Unlock()
+
+	if cb != nil {
+		cb(peerFP, msg)
+	}
+
 	return msg
 }
 
