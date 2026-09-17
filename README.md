@@ -1,8 +1,25 @@
-# Palagos — Secure P2P Cryptographic Communication Protocol
+# Palagos — Secure P2P Cryptographic Communication Protocol & Reusable Core Engine
 
 > *"Two people who have established trust should be able to communicate securely even if the infrastructure between them is hostile, compromised, monitored, censored, or completely controlled by an adversary."*
 
-Palagos is a privacy-first, peer-to-peer cryptographic communication system engineered in Go. It serves as an **auditable, educational cryptographic and protocol engineering reference** built around zero-trust transport, key evolution (Double Ratchet), authenticated encryption (ChaCha20-Poly1305), identity verification (Ed25519), and transport independence (including Tor `.onion` overlay sockets).
+Palagos is a privacy-first, peer-to-peer cryptographic communication system and **reusable core engine** written in Go. It provides end-to-end encrypted messaging, zero-trust relaying, key evolution (Double Ratchet), camera-free presential key pairing (PAKE/SAS), and dual-mode networking (Store-and-Forward Relay vs. Direct P2P Tor `.onion` sockets).
+
+---
+
+## 🌟 Key Architectural Features
+
+- 🛡️ **Zero-Trust Store-and-Forward Relay**: Relay servers (e.g., deployed via Coolify) hold zero decryption keys. Messages are encrypted with ChaCha20-Poly1305 and Double Ratchet keys known exclusively to the endpoints.
+- 🔄 **Dual Connection Modes**:
+  - **Relay Mode (`ModeRelay`)**: Routes messages through your home server relay (`.onion:9090`) with 72-hour offline mailbox queuing.
+  - **Direct P2P Mode (`ModeDirectP2P`)**: Direct peer-to-peer connection over Tor `.onion` hidden services or local sockets with **zero intermediary servers**.
+- 🔑 **Camera-Free Presential Pairing (PAKE & SAS)**:
+  - Exchange public keys over Bluetooth or proximity channels using a shared 6-digit PIN.
+  - Generates a 6-digit **Short Authentication String (SAS)** (e.g., `[ 848-711 ]`) for visual confirmation without requesting camera permissions.
+- 🔌 **Universal Native App Integration (3-in-1 SDK Engine)**:
+  - **CGo FFI Bridge (`pkg/bridge`)**: In-memory C-bindings (`libpalagos.so`, `palagos.dll`, `.aar`) for Flutter (Dart FFI), Swift, Kotlin, or C/C++ apps.
+  - **Security-Enforced RPC Daemon (`pkg/daemon`)**: Local daemon (`palagos daemon -rpc 5050`) with **256-bit CSPRNG Bearer Token auth** and **CSRF protection**.
+  - **Go Client SDK (`pkg/client`)**: High-level Go client manager supporting custom contact aliases and multiple user profiles.
+- 🎨 **Embedded Web UI**: Subcommand `palagos ui -port 4040` launches a Telegram/Discord hybrid dark mode interface accessible via any local browser.
 
 ---
 
@@ -10,10 +27,10 @@ Palagos is a privacy-first, peer-to-peer cryptographic communication system engi
 
 - 🚀 [Quick Start & Installation](#-quick-start--installation)
 - ⚙️ [How It Works](#️-how-it-works)
+- 🐳 [Home Server & Coolify Deployment](#-home-server--coolify-deployment)
 - 📁 [Project Layout](#-project-layout)
 - 💻 [CLI Operating Guide](#-cli-operating-guide)
 - 📐 [Mathematical Foundations (`docs/math.md`)](docs/math.md)
-- 📚 [Documentation Index](#-documentation-index)
 - 🧪 [Build & Test Suite](#-build--test-suite)
 
 ---
@@ -23,6 +40,7 @@ Palagos is a privacy-first, peer-to-peer cryptographic communication system engi
 ### Prerequisites
 - **Go**: Version 1.20 or later installed.
 - **Git**: For cloning the repository.
+- **Tor**: Daemon installed and running (`SOCKS5` on `127.0.0.1:9050`).
 
 ### 1. Clone & Build
 ```bash
@@ -33,6 +51,9 @@ cd Pelagos
 mkdir -p bin
 go build -o bin/palagos ./cmd/palagos
 go build -o bin/palagos-server ./cmd/palagos-server
+
+# Cross-compile for Android (ARM64)
+GOOS=android GOARCH=arm64 go build -o bin/palagos-android-arm64 ./cmd/palagos
 ```
 
 ### 2. Generate Cryptographic Identity
@@ -40,10 +61,11 @@ go build -o bin/palagos-server ./cmd/palagos-server
 ./bin/palagos gen-identity
 ```
 
-### 3. Start Zero-Trust Relay Server
+### 3. Launch Embedded Web UI (Midnight Blue Dark Mode)
 ```bash
-./bin/palagos-server -addr 0.0.0.0:8080 -transport onion
+./bin/palagos ui -port 4040
 ```
+Open **`http://localhost:4040`** in your browser to access the chat interface!
 
 ---
 
@@ -53,14 +75,17 @@ Palagos cryptographically decouples peer identities, session ratchets, binary pa
 
 ```text
 +-----------------------------------------------------------------------+
-|                       Application / User Interface                     |
+|                    Native UI Apps (Flutter / Swift / C++ / Web)       |
 +-----------------------------------------------------------------------+
                                    |
-                                   v
+         +-------------------------+-------------------------+
+         | (CGo FFI Bridge)        | (RPC Bearer Token)      | (Go SDK)
+         v                         v                         v
 +-----------------------------------------------------------------------+
-|                           Identity Layer                              |
-|   - Long-Term Ed25519 Device Keys                                     |
-|   - SHA-256 Fingerprints & Out-of-Band QR Code Verification           |
+|                    Palagos Client Engine / Manager                    |
+|   - Multi-Profile Local Identities & Custom Contact Aliases           |
+|   - Presential PIN Pairing & SAS Confirmation Generator               |
+|   - Dual-Mode Connection Router (Relay vs Direct P2P)                 |
 +-----------------------------------------------------------------------+
                                    |
                                    v
@@ -81,27 +106,30 @@ Palagos cryptographically decouples peer identities, session ratchets, binary pa
                                    |
                                    v
 +-----------------------------------------------------------------------+
-|                         Binary Wire Protocol                          |
-|   - Compact 203-byte header layout, zero JSON overhead                |
-+-----------------------------------------------------------------------+
-                                   |
-                                   v
-+-----------------------------------------------------------------------+
 |                      Transport Abstraction Layer                      |
 |                                                                       |
 |   +-----------------------+   +-----------------------+               |
-|   | Tor .onion Sockets    |   | Bluetooth RFCOMM      |               |
-|   | (Anonymity Overlay)   |   | (Local Direct P2P)    |               |
+|   | Tor .onion Sockets    |   | Bluetooth RFCOMM / BLE|               |
+|   | (Anonymity Overlay)   |   | (Camera-Free Pairing) |               |
 |   +-----------------------+   +-----------------------+               |
 +-----------------------------------------------------------------------+
 ```
 
-### Core Architecture Highlights
+---
 
-1. **Zero-Trust Relay Model**: Relay servers hold zero decryption keys and zero user private keys. The server acts strictly as a store-and-forward mailbox relay. Headers are tamper-proofed via Associated Authenticated Data (AAD).
-2. **Double Ratchet Key Evolution**: Provides both **Forward Secrecy (FS)** (past messages cannot be decrypted if keys are compromised today) and **Post-Compromise Security (PCS)** (sessions self-heal when a new ephemeral key arrives).
-3. **Transport Independence**: The core engine operates over anonymous **Tor `.onion` SOCKS5 proxies** or **Bluetooth RFCOMM**, hiding IP metadata and bypassing NAT firewalls or network censorship.
-4. **Out-of-Band Verification**: Peers exchange long-term identity fingerprints in person (via hexadecimal strings or QR codes) to eliminate Man-in-the-Middle (MITM) risks.
+## 🐳 Home Server & Coolify Deployment
+
+The repository includes a ready-to-deploy [`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml) with an embedded Tor daemon.
+
+### Deploying on Coolify:
+1. Open your **Coolify** dashboard ➔ **New Resource** ➔ **Public Repository**.
+2. Input your Pelagos Git repository URL.
+3. Select **Docker Compose** build type.
+4. Click **Deploy**.
+5. Check container **Logs** for your dynamically provisioned v3 `.onion` address:
+   ```text
+   Automated v3 .onion Address: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion:9090
+   ```
 
 ---
 
@@ -110,80 +138,76 @@ Palagos cryptographically decouples peer identities, session ratchets, binary pa
 ```text
 Pelagos/
 ├── cmd/
-│   ├── palagos/             # CLI Client Application (identity, keys, messaging)
-│   └── palagos-server/      # Standalone Store-and-Forward Relay Daemon
+│   ├── palagos/             # CLI Client Application (identity, keys, UI, daemon, pairing)
+│   └── palagos-server/      # Standalone Store-and-Forward Relay Server
 ├── pkg/
+│   ├── bridge/              # CGo FFI Export Bindings for Flutter / Native Apps
+│   ├── client/              # Multi-session Client Manager & Embedded Web UI
 │   ├── crypto/              # CSPRNG, X25519, Ed25519, HKDF, AEAD, Double Ratchet
-│   ├── identity/            # Ed25519 Identity, Fingerprinting, QR code export
+│   ├── daemon/              # Security-Enforced Local RPC/IPC Engine Daemon
+│   ├── identity/            # Ed25519 Identity, Fingerprinting & PIN/SAS Pairing
 │   ├── protocol/            # Binary Packet Encoding, Replay Window, Session State
-│   ├── transport/           # Abstract Transport, Tor .onion, Bluetooth RFCOMM
-│   └── server/              # Zero-Trust Store-and-Forward Relay Server
-├── tests/                   # Crypto unit tests, protocol tests, Go fuzz tests
-├── docs/                    # Dedicated specifications & mathematical proofs
-│   ├── math.md              # Complete mathematical foundations & field algebra
-│   ├── cryptography.md      # Cryptographic primitives & implementation rules
-│   ├── architecture.md      # System layering & component responsibilities
-│   ├── protocol.md          # Binary wire format & message type specification
-│   └── threat-model.md      # Formal adversary matrix & security guarantees
-├── go.mod
-├── go.sum
-└── README.md
+│   ├── server/              # Zero-Trust Store-and-Forward Relay Server
+│   └── transport/           # Transport Abstraction, Tor .onion, Bluetooth RFCOMM
+├── tests/                   # Unit tests, integration tests & Go fuzz tests
+├── docs/                    # Architectural & mathematical specifications
+├── bin/                     # Pre-compiled executables (Desktop & Android ARM64)
+├── Dockerfile               # Multi-stage Docker build with Tor daemon
+├── docker-compose.yml       # Coolify / Docker Compose deployment configuration
+└── entrypoint.sh            # Container initialization script
 ```
 
 ---
 
 ## 💻 CLI Operating Guide
 
-### Identity Management
+### Camera-Free PIN Pairing (No Camera Required)
 
 ```bash
-# Generate a new long-term Ed25519 identity keypair
-./bin/palagos gen-identity
+# Device 1 (Alice): Create PIN-encrypted pairing payload
+./bin/palagos pair-create -key <PRIV_KEY> -pin 482901 -alias "Alice-Phone"
 
-# Export identity fingerprint and QR code for out-of-band trust establishment
-./bin/palagos export-qr -out identity_qr.png
+# Device 2 (Bob): Open received payload using the shared PIN
+./bin/palagos pair-open -key <PRIV_KEY> -pin 482901 -payload <PAYLOAD_HEX>
+# Out: SAS CONFIRMATION CODE: [ 848-711 ]
 ```
 
-### Running the Relay Server
+### Running the Engine Daemon (For Native Apps)
 
 ```bash
-# Start a relay server listener (via Tor .onion or Bluetooth)
+# Launch local RPC Engine Daemon (Prints 256-bit Auth Token)
+./bin/palagos daemon -rpc 5050 -socks 127.0.0.1:9050
+```
+
+### Running the Store-and-Forward Relay Server
+
+```bash
+# Start zero-trust relay server
 ./bin/palagos-server -addr 0.0.0.0:8080 -transport onion
-```
-
-### Messaging over Tor `.onion` Overlay
-
-```bash
-# Send an encrypted message over Tor SOCKS5 proxy to a hidden service peer
-./bin/palagos send -transport onion -socks 127.0.0.1:9050 -to xxxxx.onion:9090 -msg "Hello securely over Tor"
 ```
 
 ---
 
 ## 📚 Documentation Index
 
-For in-depth specifications, formal proofs, threat modeling, and protocol wire layouts, consult the dedicated documentation in `docs/`:
-
 | Document | Focus & Contents |
 |---|---|
-| 📐 [**Math Foundations**](docs/math.md) | $\mathbb{F}_{2^{255}-19}$ curve equations, Ed25519 verification proofs, HKDF domain separation, Poly1305 finite field algebra, Double Ratchet state equations, 64-bit sliding window bitwise algebra |
-| 🛡️ [**Cryptography Spec**](docs/cryptography.md) | Primitives selection (X25519, Ed25519, ChaCha20-Poly1305, HKDF), constant-time guarantees, zeroization limitations |
-| 🏗️ [**Architecture Spec**](docs/architecture.md) | Layer decoupling, state machine management, transport abstraction rules |
-| 📦 [**Wire Protocol Spec**](docs/protocol.md) | 203-byte header layout, bitwise field definitions, message types, AAD calculation |
-| 🔒 [**Threat Model**](docs/threat-model.md) | Formal adversary matrix (passive eavesdropper, active attacker, malicious relay server, quantum adversary limits) |
+| 📐 [**Math Foundations**](docs/math.md) | $\mathbb{F}_{2^{255}-19}$ curve equations, Ed25519 verification, HKDF domain separation, Poly1305 algebra, Double Ratchet state equations |
+| 🛡️ [**Cryptography Spec**](docs/cryptography.md) | Primitives selection (X25519, Ed25519, ChaCha20-Poly1305, HKDF), constant-time guarantees |
+| 🏗️ [**Architecture Spec**](docs/architecture.md) | Core engine decoupling, FFI bridge, RPC daemon security, transport abstraction |
+| 📦 [**Wire Protocol Spec**](docs/protocol.md) | 203-byte header layout, bitwise field definitions, AAD calculation |
+| 🔒 [**Threat Model**](docs/threat-model.md) | Formal adversary matrix (passive eavesdropper, active attacker, malicious relay server) |
 
 ---
 
 ## 🧪 Build & Test Suite
 
-### Running Unit Tests
+### Running Unit & Integration Tests
 ```bash
-# Execute unit test suite across all packages
 go test -v ./...
 ```
 
-### Running Native Go Fuzzing
+### Running Fuzz Testing
 ```bash
-# Run fuzz testing on binary packet unmarshaler to catch buffer overreads
 go test -v -fuzz=FuzzPacketUnmarshal -fuzztime=10s ./tests
 ```
